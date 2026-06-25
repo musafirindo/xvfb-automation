@@ -1,0 +1,22 @@
+[project]
+name = "xvfb-automation"
+version = "1.0.0"
+description = "Headless browser automation toolkit: Xvfb + Chrome CDP + xdotool. Auto-login, form filling, social media account creation, and more on headless VPS."
+authors = [{ name = "musafirindo", email = "musafirindo7@gmail.com" }]
+license = { text = "MIT" }
+readme = "README.md"
+requires-python = ">=3.8"
+dependencies = [
+    "websockets>=12.0",
+    "Pillow>=9.0",
+]
+
+[project.scripts]
+xvfb-browser = "xvfb_automation:main"
+
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["xvfb_automation*"]
