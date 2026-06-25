@@ -7,7 +7,7 @@
 
 __version__ = "1.0.0"
 
-import os, sys, time, signal, subprocess, json, atexit, logging
+import os, sys, time, signal, subprocess, json, atexit, logging, asyncio
 from pathlib import Path
 
 logger = logging.getLogger("xvfb_automation")
