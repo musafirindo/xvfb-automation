@@ -187,28 +187,96 @@ class XvfbBrowser:
         return CDPController(self)
 
     def _js(self, expression: str, timeout: int = 10) -> any:
-        """Low-level: execute JavaScript via CDP websocket (sync wrapper)."""
+        """Low-level: execute JavaScript via CDP websocket. Auto-handles event loops."""
         import asyncio
         try:
             loop = asyncio.get_running_loop()
+            # Already inside event loop — create task in new thread
+            import concurrent.futures
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
+                fut = ex.submit(asyncio.run, self._async_js(expression, timeout))
+                return fut.result(timeout=timeout + 5)
         except RuntimeError:
+            # No event loop — use asyncio.run directly
             return asyncio.run(self._async_js(expression, timeout))
-        # Already in event loop — need thread
-        import concurrent.futures
-        with concurrent.futures.ThreadPoolExecutor() as ex:
-            return ex.submit(asyncio.run, self._async_js(expression, timeout)).result(timeout + 5)
 
     async def _async_js(self, expression: str, timeout: int = 10):
+        """Execute JS via CDP WebSocket with proper error handling."""
         import websockets
-        async with websockets.connect(self._ws_url, open_timeout=10) as ws:
-            msg = {"id": 1, "method": "Runtime.evaluate",
-                   "params": {"expression": expression, "returnByValue": True}}
-            await ws.send(json.dumps(msg))
-            resp = await asyncio.wait_for(ws.recv(), timeout=timeout)
-            result = json.loads(resp)
-            if "result" in result and "result" in result["result"]:
-                return result["result"]["result"].get("value")
-            return None
+        if not self._ws_url:
+            self._wait_cdp()
+            if not self._ws_url:
+                logger.error("No CDP WebSocket URL available")
+                return None
+        last_err = None
+        for attempt in range(2):  # 1 retry
+            try:
+                async with websockets.connect(
+                    self._ws_url,
+                    open_timeout=min(10, timeout),
+                    close_timeout=5,
+                ) as ws:
+                    msg = {
+                        "id": 1,
+                        "method": "Runtime.evaluate",
+                        "params": {
+                            "expression": expression,
+                            "returnByValue": True,
+                            "awaitPromise": False,
+                        },
+                    }
+                    await ws.send(json.dumps(msg))
+                    resp_raw = await asyncio.wait_for(ws.recv(), timeout=timeout)
+                    resp = json.loads(resp_raw)
+
+                    # Check for CDP-level error
+                    if "error" in resp:
+                        err = resp["error"]
+                        logger.warning(f"CDP error: {err.get('message', err)}")
+                        # Page context lost — try reconnecting
+                        if "context" in str(err).lower():
+                            self._ws_url = None
+                            self._wait_cdp()
+                            continue
+                        return None
+
+                    # Extract value
+                    result = resp.get("result", {})
+                    inner = result.get("result", {})
+                    if "value" in inner:
+                        return inner["value"]
+                    # Some expressions return object with objectId
+                    if "objectId" in inner:
+                        return f"[object:{inner.get('type','unknown')}]"
+                    if "description" in inner:
+                        return inner["description"]
+                    # Exception thrown in JS
+                    if inner.get("subtype") == "error":
+                        desc = inner.get("description", "unknown error")
+                        logger.warning(f"JS exception: {desc}")
+                        return None
+                    return None
+
+            except asyncio.TimeoutError:
+                last_err = f"Timeout after {timeout}s"
+                logger.warning(f"CDP timeout (attempt {attempt+1}/2): {expression[:60]}...")
+                # Refresh WS URL and retry
+                self._ws_url = None
+                try:
+                    self._wait_cdp()
+                except Exception:
+                    pass
+            except Exception as e:
+                last_err = str(e)
+                logger.warning(f"CDP error (attempt {attempt+1}/2): {e}")
+                self._ws_url = None
+                try:
+                    self._wait_cdp()
+                except Exception:
+                    pass
+
+        logger.error(f"CDP failed after 2 attempts: {last_err}")
+        return None
 
     def eval(self, expression: str, timeout: int = 10):
         """Execute JavaScript and return the value."""
@@ -345,13 +413,21 @@ class CDPController:
         return self._browser._js(expression, timeout)
 
     async def send(self, method: str, params: dict = None, timeout: int = 10):
-        """Send arbitrary CDP command."""
+        """Send arbitrary CDP command with error handling."""
         import websockets
+        if not self._browser._ws_url:
+            self._browser._wait_cdp()
+            if not self._browser._ws_url:
+                logger.error("No CDP WebSocket URL available for send()")
+                return {"error": "no websocket url"}
         async with websockets.connect(self._browser._ws_url, open_timeout=10) as ws:
             msg = {"id": 1, "method": method, "params": params or {}}
             await ws.send(json.dumps(msg))
-            resp = await asyncio.wait_for(ws.recv(), timeout=timeout)
-            return json.loads(resp)
+            resp_raw = await asyncio.wait_for(ws.recv(), timeout=timeout)
+            resp = json.loads(resp_raw)
+            if "error" in resp:
+                logger.warning(f"CDP error in {method}: {resp['error'].get('message', resp['error'])}")
+            return resp
 
     def get_cookies(self):
         """Get all browser cookies as JSON."""
