@@ -392,12 +392,22 @@ class XvfbBrowser:
         deadline = time.time() + self.startup_timeout
         while time.time() < deadline:
             try:
-                resp = urllib.request.urlopen(f"http://localhost:{self.cdp_port}/json/version")
-                data = json.loads(resp.read())
-                self._ws_url = data.get("webSocketDebuggerUrl")
-                if self._ws_url:
-                    logger.info(f"CDP ready: {self._ws_url[:60]}...")
-                    return
+                # Get page-level WebSocket URL (not browser-level — Runtime.evaluate needs page target)
+                resp = urllib.request.urlopen(f"http://localhost:{self.cdp_port}/json")
+                targets = json.loads(resp.read())
+                # Temukan page pertama yang bukan devtools/service worker
+                for t in targets:
+                    if t.get("type") == "page" and "webSocketDebuggerUrl" in t:
+                        self._ws_url = t["webSocketDebuggerUrl"]
+                        self._sid = t.get("id", "")
+                        logger.info(f"CDP ready (page): {t.get('title','')[:50]} | {self._ws_url[:60]}...")
+                        return
+                # Fallback: pakai browser-level (kurang ideal tapi bisa utk beberapa command)
+                if targets:
+                    self._ws_url = targets[0].get("webSocketDebuggerUrl", "")
+                    if self._ws_url:
+                        logger.info(f"CDP ready (target): {self._ws_url[:60]}...")
+                        return
             except (urllib.error.URLError, ConnectionRefusedError, OSError):
                 pass
             time.sleep(0.5)
